@@ -121,7 +121,7 @@ class Message:
     _kwargs - other arguments dictionary
     """
     def __init__(self, action: Actions, **kwargs):
-        self.action = action
+        self.action = Actions(action)
         self.time = kwargs.pop("time", time.time_ns())
         self.kwargs = kwargs
 
@@ -150,7 +150,7 @@ class Response:
     _kwargs - other arguments dictionary
     """
     def __init__(self, response: Responses, **kwargs):
-        self.response = response
+        self.response = Responses(response)
         self.time = kwargs.pop("time", time.time_ns())
         self.kwargs = kwargs
 
