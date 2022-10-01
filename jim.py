@@ -200,10 +200,14 @@ class MessageFields(str, enum.Enum):
     TIME = "time"
     TYPE = "type"
     USER = "user"
-    # nested field names should begin with the enclosing field name(s) loined with delimiter
-    USER_ACCOUNT_NAME = MESSAGE_LEVEL_DELIMITER.join(("user", "account_name"))
-    USER_PASSWORD = MESSAGE_LEVEL_DELIMITER.join(("user", "password"))
-    USER_STATUS = MESSAGE_LEVEL_DELIMITER.join(("user", "status"))
+    # nested field names are also repeated here for the purpose of message construction by the clients
+    ACCOUNT_NAME = "account_name"
+    PASSWORD = "password"
+    STATUS = "status"
+    # nested field names should begin with the enclosing field name(s) joined with delimiter
+    USER_ACCOUNT_NAME = MESSAGE_LEVEL_DELIMITER.join((USER, ACCOUNT_NAME))
+    USER_PASSWORD = MESSAGE_LEVEL_DELIMITER.join((USER, PASSWORD))
+    USER_STATUS = MESSAGE_LEVEL_DELIMITER.join((USER, STATUS))
     TO = "to"
     FROM = "from"
     ENCODING = "encoding"
@@ -430,3 +434,8 @@ class Response:
         }
         response.update(**self.kwargs)
         return json.dumps(response)
+
+    # return response message
+    @property
+    def message(self) -> str:
+        return self.kwargs.get(ResponseFields.ALERT, self.kwargs.get(ResponseFields.ERROR, ""))
