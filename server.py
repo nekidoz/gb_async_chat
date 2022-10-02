@@ -19,33 +19,62 @@ class Server:
                      self._address if self._address else '(все интерфейсы)', self._port)
         # Create and bind socket and listed to connections
         self._listening = False
-        self._socket = sock.socket(sock.AF_INET, sock.SOCK_STREAM)
-        self._socket.bind((self._address, self._port))
-        self._socket.listen()
-        self._listening = True
+        try:
+            self._socket = sock.socket(sock.AF_INET, sock.SOCK_STREAM)
+            self._socket.bind((self._address, self._port))
+            self._socket.listen()
+            self._listening = True
+        except OSError as e:
+            log.critical("Не удалось инициализировать порт для входящих подключений: %s", e)
+        except Exception as e:
+            log.critical("Непредвиденная ошибка при инициализации порта для входящих подключений: %s", e)
 
     @property
     def listening(self):
         return self._listening
 
-    def __call__(self):
+    def accept(self):
         """
         Process client messages
         :return: None
         """
         if not self._listening:
-            log.error("Обработка соединений невозможна - не установлено прослушивание порта сервера")
+            log.critical("Обработка соединений невозможна - не инициализирован порт для входящих подключений")
             return
-        while True:
+        try:
+            connected = False
             connection, address = self._socket.accept()
-            message = jim.Message.from_str(connection.recv(jim.MAX_JIM_LEN).decode(sett.DEFAULT_ENCODING))
-            log.debug("Сообщение от %s: %s", address, message.json)
-            if message.action == jim.Actions.PRESENCE:
-                response = jim.Response(**jim.Responses.OK.response).json
-            else:
-                response = jim.Response(**jim.Responses.BAD_REQUEST.response).json
-            connection.send(response.encode(sett.DEFAULT_ENCODING))
-            connection.close()
+            connected = True
+            connection.settimeout(sett.CONNECTION_TIMEOUT)
+            log.info("Клиент %s:%d: Входящее соединение установлено", *address)
+            while True:                 # Loop through incoming messages
+                data = connection.recv(jim.MAX_JIM_LEN).decode(sett.DEFAULT_ENCODING)
+                if not data:
+                    log.info("Клиент %s:%d: Соединение закрыто клиентом", *address)
+                    break
+                try:
+                    message = jim.Message.from_str(data)
+                except ValueError as e:
+                    log.error("Клиент %s:%d: Получены некорректные данные: %s", *address, data)
+                    response = jim.Response(**jim.Responses.BAD_REQUEST.response).json
+                else:
+                    log.debug("Клиент %s:%d: Получено сообщение: %s", *address, message.json)
+                    if message.action == jim.Actions.PRESENCE:
+                        log.debug("Клиент %s:%d: Формирование ответа на сообщение присутствия", *address)
+                        response = jim.Response(**jim.Responses.OK.response).json
+                    else:
+                        log.error("Клиент %s:%d: Неподдерживаемый тип сообщения, формирование ответа", *address)
+                        response = jim.Response(**jim.Responses.BAD_REQUEST.response).json
+                log.debug("Клиент %s:%d: Отправка ответа: %s", *address, response)
+                connection.send(response.encode(sett.DEFAULT_ENCODING))
+        except TimeoutError:
+            log.info("Клиент %s:%d: Соединение закрыто по таймауту", *address)
+        except ValueError as e:             # Can happen when creating response
+            log.critical("Клиент %s:%d: Непредвиденная ошибка данных: %s", e)
+        finally:
+            if connected:
+                log.debug("Клиент %s:%d: Завершение соединения на стороне сервера", *address)
+                connection.close()
 
     def shutdown(self):
         if self._listening:
@@ -69,7 +98,13 @@ if __name__ == "__main__":
         log.critical("Не удалось инициализировать сервер, приложение завершается")
         exit(-1)
     # Process chat connections
-    server()
+    try:
+        while True:
+            server.accept()
+    except KeyboardInterrupt:
+        log.critical("Обработка входящих соединений прервана по команде с клавиатуры")
+    except Exception as e:
+        log.critical("Непредвиденная ошибка при обработке входящего соединения: %s", e)
     # Shut down server
     server.shutdown()
     log.debug("Приложение завершило работу")

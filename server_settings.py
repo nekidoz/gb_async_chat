@@ -9,6 +9,7 @@ DEFAULT_ENCODING = 'UTF-8'              # Default encoding for JIM messages
 
 # The following are settings unique to server
 DEFAULT_LISTEN_ADDRESS = ''             # IP address for server to listen on
+CONNECTION_TIMEOUT = 60                 # Connection timeout in seconds
 
 DIRECTORY_SEPARATOR = '/'
 

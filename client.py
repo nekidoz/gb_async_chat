@@ -18,13 +18,13 @@ class Client:
         log.critical("Соединение с чат-сервером %s:%d",
                      self._server_address if self._server_address else '(broadcast)', self._server_port)
         self._connected = False
-        self._socket = sock.socket(sock.AF_INET, sock.SOCK_STREAM)
         try:
+            self._socket = sock.socket(sock.AF_INET, sock.SOCK_STREAM)
             self._socket.connect((self._server_address, self._server_port))
         except ConnectionRefusedError as e:
             log.critical("Соединение отклонено сервером: %s", e)
         except Exception as e:
-            log.critical("Не удалось установить соединение с сервером: %s", e)
+            log.critical("Непредвиденная ошибка при установлении соединения с сервером: %s", e)
         else:
             self._connected = True
 
@@ -50,7 +50,7 @@ class Client:
             log.error("Ошибка формирования сообщения: %s", e)
             return
         except Exception as e:
-            log.critical("Неожиданная ошибка при формировании или посылке сообщения: %s", e)
+            log.critical("Непредвиденная ошибка при формировании или посылке сообщения: %s", e)
             return
         log.debug("Прием ответа от сервера")
         try:
@@ -59,7 +59,7 @@ class Client:
             log.error("Некорректный формат принятого сообщения: %s", e)
             return
         except Exception as e:
-            log.critical("Неожиданная ошибка при приеме сообщения: %s", e)
+            log.critical("Непредвиденная ошибка при приеме сообщения: %s", e)
             return
         log.debug("Ответ от сервера: %s", response.json)
         if response.response == jim.Responses.OK:
