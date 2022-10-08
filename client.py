@@ -20,9 +20,15 @@ class Client:
         self._connected = False
         try:
             self._socket = sock.socket(sock.AF_INET, sock.SOCK_STREAM)
+            self._socket.settimeout(sett.CONNECTION_TIMEOUT)            # timeout of connection to server
             self._socket.connect((self._server_address, self._server_port))
+            self._socket.setblocking(True)              # blocking mode - will wait for data during send() and recv()
         except ConnectionRefusedError as e:
             log.critical("Соединение отклонено сервером: %s", e)
+        except sock.timeout as e:               # в соответствии с описанием в лекции, не тестировалось
+            log.critical("Превышено время ожидания соединения с сервером: %s", e)
+        except sock.error as e:                 # в соответствии с описанием в лекции, не тестировалось
+            log.critical("Ошибка соединения с сервером: %s", e)
         except Exception as e:
             log.critical("Непредвиденная ошибка при установлении соединения с сервером: %s", e)
         else:
@@ -49,6 +55,9 @@ class Client:
         except ValueError as e:
             log.error("Ошибка формирования сообщения: %s", e)
             return
+        except sock.timeout as e:       # в соответствии с описанием в лекции, не тестировалось
+            log.critical("Превышено время ожидания посылки данных серверу: %s", e)
+            return
         except Exception as e:
             log.critical("Непредвиденная ошибка при формировании или посылке сообщения: %s", e)
             return
@@ -57,6 +66,9 @@ class Client:
             response = jim.Response.from_str(self._socket.recv(jim.MAX_JIM_LEN).decode(sett.DEFAULT_ENCODING))
         except ValueError as e:
             log.error("Некорректный формат принятого сообщения: %s", e)
+            return
+        except sock.timeout as e:       # в соответствии с описанием в лекции, не тестировалось
+            log.critical("Превышено время ожидания приема данных от сервера: %s", e)
             return
         except Exception as e:
             log.critical("Непредвиденная ошибка при приеме сообщения: %s", e)

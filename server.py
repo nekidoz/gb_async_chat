@@ -22,7 +22,9 @@ class Server:
         try:
             self._socket = sock.socket(sock.AF_INET, sock.SOCK_STREAM)
             self._socket.bind((self._address, self._port))
-            self._socket.listen()
+            self._socket.listen(5)          # размер буфера входящих соединений - в соответствии с описанием в лекции
+            self._socket.setblocking(True)  # blocking mode - will wait for data during send() and recv()
+            self._socket.settimeout(None)   # will wait for incoming connections indefinitely
             self._listening = True
         except OSError as e:
             log.critical("Не удалось инициализировать порт для входящих подключений: %s", e)
