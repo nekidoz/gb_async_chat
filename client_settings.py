@@ -10,6 +10,7 @@ DEFAULT_ENCODING = 'UTF-8'              # Default encoding for JIM messages
 # The following are settings unique to client
 DEFAULT_SERVER_ADDRESS = '127.0.0.1'    # Server IP address for client to connect to
 CONNECTION_TIMEOUT = 60                 # Connection timeout in seconds
+SELECT_TIMEOUT = 60.0                   # Timeout for select.select() function waiting for data
 
 DIRECTORY_SEPARATOR = '/'
 

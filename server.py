@@ -47,7 +47,7 @@ class Server:
             connected = False
             connection, address = self._socket.accept()
             connected = True
-            connection.settimeout(sett.CONNECTION_TIMEOUT)
+            connection.settimeout(sett.CLIENT_CONNECTION_TIMEOUT)
             log.info("Клиент %s:%d: Входящее соединение установлено", *address)
             while True:                 # Loop through incoming messages
                 data = connection.recv(jim.MAX_JIM_LEN).decode(sett.DEFAULT_ENCODING)

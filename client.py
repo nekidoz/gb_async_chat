@@ -1,5 +1,7 @@
 import logging
 import socket as sock
+import select
+import sys
 import argparse
 
 import jim
@@ -15,7 +17,7 @@ class Client:
     def __init__(self, server_address: str = None, server_port: str = None):
         self._server_address = server_address if server_address else sett.DEFAULT_SERVER_ADDRESS
         self._server_port = int(server_port) if server_port else sett.DEFAULT_PORT
-        log.critical("Соединение с чат-сервером %s:%d",
+        log.debug("Соединение с чат-сервером %s:%d",
                      self._server_address if self._server_address else '(broadcast)', self._server_port)
         self._connected = False
         try:
@@ -32,64 +34,184 @@ class Client:
         except Exception as e:
             log.critical("Непредвиденная ошибка при установлении соединения с сервером: %s", e)
         else:
+            log.critical("Соединение с сервером %s:%d установлено с адреса %s:%d",
+                         self._server_address if self._server_address else '(broadcast)', self._server_port,
+                         *self._socket.getsockname())
             self._connected = True
 
     @property
     def connected(self):
         return self._connected
 
-    def __call__(self):
+    def _send_message_to_server(self, message: dict) -> bool:
         if not self._connected:
             log.error("Чат невозможен - не установлено соединение с сервером")
-            return
-        log.debug("Посылка серверу сообщения присутствия (presence)")
+            return False
+        log.debug(f"Посылка сообщения серверу: {message}")
         try:
-            message = jim.Message(
-                **{jim.MessageFields.ACTION: jim.Actions.PRESENCE,
+            self._socket.send(jim.Message(**message).json.encode(sett.DEFAULT_ENCODING))
+        except ValueError as e:
+            log.error("Ошибка формирования сообщения: %s", e)
+            return False
+        except sock.timeout as e:       # в соответствии с описанием в лекции, не тестировалось
+            log.critical("Превышено время ожидания посылки данных серверу: %s", e)
+            return False
+        except Exception as e:
+            log.critical("Непредвиденная ошибка при формировании или посылке сообщения: %s", e)
+            return False
+        else:
+            return True
+
+    def _receive_from_server(self) -> (bool, str):
+        if not self._connected:
+            log.error("Чат невозможен - не установлено соединение с сервером")
+            return False, ""
+        log.debug("Прием сообщения от сервера")
+        try:
+            response_str = self._socket.recv(jim.MAX_JIM_LEN)
+            if not response_str:
+                log.critical("Соединение закрыто сервером.")
+                self._connected = False
+                return False, ""
+            log.debug(f"Получено сообщение от сервера: {response_str}")
+        except sock.timeout as e:       # в соответствии с описанием в лекции, не тестировалось
+            log.critical("Превышено время ожидания приема данных от сервера: %s", e)
+            return False, ""
+        except BrokenPipeError as e:
+            log.critical("Нет соединения с сервером: %s", e)
+            # self._connected = False
+            return False, ""
+        except Exception as e:
+            log.critical("Непредвиденная ошибка при приеме сообщения: %s", e)
+            return False, ""
+        return True, response_str
+
+    def _receive_response_from_server(self) -> (bool, jim.Response):
+        log.debug("Прием ответа (response) от сервера")
+        try:
+            success, response_str = self._receive_from_server()
+            if not success:
+                return False, None
+            response = jim.Response.from_str(response_str.decode(sett.DEFAULT_ENCODING))
+        except ValueError as e:
+            log.error("Некорректный формат принятого ответа: %s", e)
+            return False, None
+        except Exception as e:
+            log.critical("Непредвиденная ошибка при приеме или декодировании ответа: %s", e)
+            return False, None
+        log.debug("Ответ от сервера: %s", response.json)
+        return True, response
+
+    def _receive_message_from_server(self) -> (bool, jim.Message):
+        log.debug("Прием сообщения (message) от сервера")
+        try:
+            success, message_str = self._receive_from_server()
+            if not success:
+                return False, None
+            message = jim.Message.from_str(message_str.decode(sett.DEFAULT_ENCODING))
+        except ValueError as e:
+            log.error("Некорректный формат принятого сообщения: %s", e)
+            return False, None
+        except Exception as e:
+            log.critical("Непредвиденная ошибка при приеме или декодировании сообщения: %s", e)
+            return False, None
+        log.debug("Сообщение от сервера: %s", message.json)
+        return True, message
+
+    def _send_message_and_wait_for_response(self, message: dict) -> bool:
+        if not self._send_message_to_server(message):
+            return False
+        success, response = self._receive_response_from_server()
+        if not success:
+            return False
+        if response.response != jim.Responses.OK:
+            log.error("Ошибочный код возврата сервера: %s - %s",  response.response, response.message)
+            return False
+        log.debug("Сообщение подтверждено")
+        return True
+
+    def send_presence(self) -> bool:
+        return self._send_message_and_wait_for_response(
+                {jim.MessageFields.ACTION: jim.Actions.PRESENCE,
                  jim.MessageFields.USER: {
                      jim.MessageFields.ACCOUNT_NAME: "test",
                      jim.MessageFields.STATUS: "Online"
                  }
-                 })
-            self._socket.send(message.json.encode(sett.DEFAULT_ENCODING))
-        except ValueError as e:
-            log.error("Ошибка формирования сообщения: %s", e)
-            return
-        except sock.timeout as e:       # в соответствии с описанием в лекции, не тестировалось
-            log.critical("Превышено время ожидания посылки данных серверу: %s", e)
-            return
-        except Exception as e:
-            log.critical("Непредвиденная ошибка при формировании или посылке сообщения: %s", e)
-            return
-        log.debug("Прием ответа от сервера")
+                })
+
+    def send_chat_message(self, message_text: str) -> bool:
+        return self._send_message_and_wait_for_response(
+                {jim.MessageFields.ACTION: jim.Actions.MESSAGE,
+                 jim.MessageFields.TO: "all",
+                 jim.MessageFields.FROM: "me",
+                 jim.MessageFields.MESSAGE: message_text
+                })
+
+    def receive_chat_message(self) -> (bool, str, str, str):
+        """
+        Receives chat message from server
+        :return: status, sender, addressee and message
+        """
+        success, message = self._receive_message_from_server()
+        if not success:
+            return False, "", "", ""
         try:
-            response = jim.Response.from_str(self._socket.recv(jim.MAX_JIM_LEN).decode(sett.DEFAULT_ENCODING))
-        except ValueError as e:
-            log.error("Некорректный формат принятого сообщения: %s", e)
+            if message.action != jim.Actions.MESSAGE:
+                log.error("Ожидается сообщения чата, получено сообщение: %s", message.json)
+                return False, "", "", ""
+            else:
+                return True, \
+                       message.kwargs[jim.MessageFields.FROM], \
+                       message.kwargs[jim.MessageFields.TO], \
+                       message.kwargs[jim.MessageFields.MESSAGE]
+        except KeyError as e:
+            log.error("Неверный формат сообщения чата: %s", message.json)
+            return False, "", "", ""
+
+    def wait_for_messages(self):
+        while True:                 # wait for data from stdin or server connection
+            print("Введите сообщение: ", end="", flush=True)
+            try:
+                read_ready, _, _ = select.select([sys.stdin, self._socket], [], [], sett.SELECT_TIMEOUT)
+            except select.error as e:
+                log.critical("Непредвиденная ошибка select(): %s", e)
+                return
+            if not read_ready:
+                print("")
+                log.debug("Нет новых сообщений")
+            else:
+                for connection in read_ready:
+                    if connection.fileno() == sys.stdin.fileno():
+                        # Input chat message from keyboard and send it to everyone else
+                        if not self.send_chat_message(input()):
+                            return
+                    else:
+                        print("")
+                        # Receive message sent by someone else
+                        success, sender, addressee, text = self.receive_chat_message()
+                        if not success:
+                            return
+                        log.info("Получено сообщение от '%s' для '%s': '%s'", sender, addressee, text)
+                        print(f"({sender}->{addressee}): {text}")
+
+    def chat(self):
+        if not self.send_presence():
             return
-        except sock.timeout as e:       # в соответствии с описанием в лекции, не тестировалось
-            log.critical("Превышено время ожидания приема данных от сервера: %s", e)
+        try:
+            self.wait_for_messages()
+        except KeyboardInterrupt:
             return
-        except Exception as e:
-            log.critical("Непредвиденная ошибка при приеме сообщения: %s", e)
-            return
-        log.debug("Ответ от сервера: %s", response.json)
-        if response.response == jim.Responses.OK:
-            log.debug("Сообщение подтверждено")
-        else:
-            log.error("Ошибочный код возврата сервера: %s - %s",  response.response, response.message)
 
     def shutdown(self):
         if self._connected:
-            log.critical("Завершение соединения с чат-сервером %s:%d",
-                         self._server_address if self._server_address else '(broadcast)', self._server_port)
+            log.critical("Завершение соединения с чат-сервером %s:%d с адреса %s:%d",
+                         self._server_address if self._server_address else '(broadcast)', self._server_port,
+                         *self._socket.getsockname())
             self._socket.close()
             self._connected = False
 
 
-if __name__ == "__main__":
-    # Initialize logger
-    log = logging.getLogger(sett.LOG_NAME)
+def main() -> bool:
     # Parse command-line arguments
     parser = argparse.ArgumentParser()
     parser.add_argument('address', nargs='?', default=None)
@@ -100,9 +222,16 @@ if __name__ == "__main__":
     client = Client(args.address, args.port)
     if not client.connected:
         log.critical("Не удалось установить соединение с сервером, приложение завершается")
-        exit(-1)
+        return False
     # Chat
-    client()
+    client.chat()
     # Shut down client
     client.shutdown()
     log.debug("Приложение завершило работу")
+    return True
+
+
+if __name__ == "__main__":
+    # Initialize logger
+    log = logging.getLogger(sett.LOG_NAME)
+    exit(0 if main() else -1)
