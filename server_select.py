@@ -12,9 +12,10 @@ import server_log_config
 
 @dataclass
 class Connection:
-    __slots__ = ('chat', 'connection', 'address')       # Optimize memory usage with slots
+    __slots__ = ('connection', 'address', 'nickname')       # Optimize memory usage with slots
     connection: sock.socket         # connection instance
     address: (str, int)             # client address
+    nickname: str                   # client nickname used to send messages to
 
     def fileno(self):
         """ Return file descriptor to use with select.select() """
@@ -89,9 +90,33 @@ class Server:
         log.info("Клиент %s:%d: Входящее соединение установлено", *address)
         self._connections[connection] = Connection(
             connection=connection,
-            address=address
+            address=address,
+            nickname=""
         )
         return True
+
+
+    def _check_nickname(self, connection: Connection, nickname: str) -> bool:
+        """
+        Check if nickname exists for connection;
+        if not, assign the given nickname and return True;
+        if exists, check is the given nickname matches the assigned one;
+        if not, return False, else return True
+        :param connection: connection to check
+        :param nickname: nickname to check
+        :return: check status
+        """
+        if connection.nickname is None or connection.nickname == "":
+            connection.nickname = nickname
+            log.debug("Клиент %s:%d: Установлено имя (%s) для соединения", *connection.address, connection.nickname)
+            return True
+        # Report nickname change is invalid if nickname mismatch
+        elif connection.nickname != nickname:
+            log.debug("Клиент %s:%d: Несовпадение имени отправителя (%s) с именем пользователя (%s) для соединения",
+                      *connection.address, nickname, connection.nickname)
+            return False
+        else:
+            return True
 
     def _process_message(self, connection: Connection) -> bool:
         """
@@ -112,23 +137,70 @@ class Server:
                 response = jim.Response(**jim.Responses.BAD_REQUEST.response).json
             else:
                 log.debug("Клиент %s:%d: Получено сообщение: %s", *connection.address, message.json)
-                if message.action == jim.Actions.PRESENCE or message.action == jim.Actions.MESSAGE:
+
+                # ************ PRESENCE ***************
+                if message.action == jim.Actions.PRESENCE:
+                    sender_nickname = message.kwargs[jim.MessageFields.USER][jim.MessageFields.ACCOUNT_NAME]
                     log.debug("Клиент %s:%d: Формирование ответа на сообщение присутствия", *connection.address)
-                    response = jim.Response(**jim.Responses.OK.response).json
-                    forward_message = message.action == jim.Actions.MESSAGE
+                    if not self._check_nickname(connection, sender_nickname):
+                        response = jim.Response(**jim.Responses.BAD_LOGIN.response).json
+                    else:
+                        response = jim.Response(**jim.Responses.OK.response).json
+
+                # ************ MESSAGE ***************
+                elif message.action == jim.Actions.MESSAGE:
+                    sender_nickname = message.kwargs[jim.MessageFields.FROM]
+                    if not self._check_nickname(connection, sender_nickname):
+                        log.debug("Клиент %s:%d: Формирование сообщения об ошибке аутентификации", *connection.address)
+                        response = jim.Response(**jim.Responses.BAD_LOGIN.response).json
+                    else:
+                        target_nickname = message.kwargs[jim.MessageFields.TO]
+
+                        # Forward message to all users
+                        if target_nickname == jim.BROADCAST_MESSAGE_ADDRESS:
+
+                            # Send the message
+                            log.debug("Клиент %s:%d: Пересылка сообщения всем клиентам", *connection.address)
+                            for other_connection in self._connections:
+                                if other_connection.fileno() != connection.connection.fileno():
+                                    log.debug("Клиент %s:%d: Пересылка сообщения клиенту %s:%d",
+                                              *connection.address, *other_connection.getpeername())
+                                    other_connection.send(data_bytes)
+
+                            # Confirm regardless of whether there were any other users
+                            log.debug("Клиент %s:%d: Формирование подтверждения отправки", *connection.address)
+                            response = jim.Response(**jim.Responses.OK.response).json
+
+                        # Send message to particular user(-s if multiple connections for the same nickname)
+                        # (chats not processed)
+                        else:
+
+                            # filter connections by nickname, excluding sender
+                            forward_destinations = [destination for destination in self._connections.values()
+                                                    if destination.nickname == target_nickname and
+                                                    destination.connection.fileno() != connection.fileno()]
+
+                            # if no users found, error
+                            if not forward_destinations:
+                                log.debug("Клиент %s:%d: Формирование сообщения 'адресат %s не найден' для отправителя",
+                                          *connection.address, target_nickname)
+                                response = jim.Response(**jim.Responses.NOT_FOUND.response).json
+
+                            # is destination(s) found, send message
+                            else:
+                                log.debug("Клиент %s:%d: Пересылка сообщения клиенту(-ам) с именем %s",
+                                          *connection.address, target_nickname)
+                                for other_connection in forward_destinations:
+                                    log.debug("Клиент %s:%d: Пересылка сообщения клиенту %s:%d",
+                                              *connection.address, *other_connection.connection.getpeername())
+                                    other_connection.connection.send(data_bytes)
+                                log.debug("Клиент %s:%d: Формирование подтверждения отправки", *connection.address)
+                                response = jim.Response(**jim.Responses.OK.response).json
+
+                # ************ UNKNOWN ***************
                 else:
                     log.error("Клиент %s:%d: Неподдерживаемый тип сообщения, формирование ответа", *connection.address)
                     response = jim.Response(**jim.Responses.BAD_REQUEST.response).json
-            log.debug("Клиент %s:%d: Отправка ответа: %s", *connection.address, response)
-            connection.connection.send(response.encode(sett.DEFAULT_ENCODING))
-            # Forward chat message to other clients
-            if forward_message:
-                log.debug("Клиент %s:%d: Пересылка сообщения клиентам", *connection.address)
-                for other_connection in self._connections:
-                    if other_connection.fileno() != connection.connection.fileno():
-                        log.debug("Клиент %s:%d: Пересылка сообщения клиенту %s:%d",
-                                  *connection.address, *other_connection.getpeername())
-                        other_connection.send(data_bytes)
         except ValueError as e:  # Can happen when creating response
             log.critical("Клиент %s:%d: Непредвиденная ошибка данных: %s", e)
             return False
@@ -138,6 +210,24 @@ class Server:
         except ConnectionResetError:
             log.info("Клиент %s:%d: Соединение закрыто клиентом.", *connection.address)
             return False
+
+        # Send response to client
+        try:
+            if not response:
+                log.critical("Клиент %s:%d: Формирование сообщения об ошибке сервера по умолчанию", *connection.address)
+                response = jim.Response(**jim.Responses.SERVER_ERROR.response).json
+            log.debug("Клиент %s:%d: Отправка ответа: %s", *connection.address, response)
+            connection.connection.send(response.encode(sett.DEFAULT_ENCODING))
+        except ValueError as e:  # Can happen when creating response
+            log.critical("Клиент %s:%d: Непредвиденная ошибка данных: %s", e)
+            return False
+        except TimeoutError:
+            log.warning("Клиент %s:%d: Соединение закрывается по таймауту.", *connection.address)
+            return False
+        except ConnectionResetError:
+            log.info("Клиент %s:%d: Соединение закрыто клиентом.", *connection.address)
+            return False
+
         return True
 
     def _process_messages(self) -> bool:
@@ -168,7 +258,7 @@ class Server:
         while True:
             log.debug("Старт цикла обслуживания соединений.")
             print("Существующие соединения: ", end="")
-            print([connection.address for connection in self._connections.values()])
+            print([(connection.address, connection.nickname) for connection in self._connections.values()])
             # Accept all pending connections
             while self._accept_connection():
                 pass

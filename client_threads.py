@@ -4,6 +4,10 @@ import select
 import sys
 import argparse
 
+import time
+import threading
+import queue
+
 import jim
 
 import client_settings as sett
@@ -14,6 +18,83 @@ class Client:
     """
     Chat client class
     """
+
+    def socket_reader(self):
+        # def _receive_from_server(self) -> (bool, str):
+        if not self._connected:
+            log.error("Прием сообщений невозможен - не установлено соединение с сервером")
+            self._reader_queue.put(None)
+            return
+        log.info("Прием сообщений от сервера стартовал")
+        while True:
+            message = None
+            try:
+                self._socket_lock.acquire(True)
+                message = self._socket.recv(jim.MAX_JIM_LEN)
+            except sock.timeout as e:
+                continue
+            except BrokenPipeError as e:
+                log.critical("Нет соединения с сервером: %s", e)
+                self._connected = False
+                self._reader_queue.put(None)
+                return
+            except Exception as e:
+                log.critical("Непредвиденная ошибка при приеме сообщения: %s", e)
+                self._reader_queue.put(None)
+                return
+            finally:
+                self._socket_lock.release()
+            if message:
+                log.debug(f"Получено сообщение от сервера: {message}")
+                self._reader_queue.put(message)
+                log.debug(f"Размер очереди входящих сообщений: {self._reader_queue.qsize()}")
+            else:
+                log.critical("Соединение закрыто сервером.")
+                self._connected = False
+                self._reader_queue.put(None)
+                return
+
+    def message_processor(self):
+        log.info("Обработка принятых сообщений стартовала")
+        while True:
+            message = self._reader_queue.get()
+            if not message:
+                log.info("Обработка принятых сообщений закончена - обнаружен признак конца очереди")
+                return
+            else:
+                log.debug(f"Получено сообщение для обработки: {message}")
+                self._writer_queue.put(message)
+                log.debug("Полученное для обработки сообщение обработано")
+                self._reader_queue.task_done()
+                log.debug(f"Размер очереди входящих сообщений: {self._reader_queue.qsize()}")
+
+    def socket_writer(self):
+        if not self._connected:
+            log.error("Отправка сообщений невозможна - не установлено соединение с сервером")
+            return
+        log.info("Отправка сообщений на сервер стартовала")
+        while True:
+            message = self._writer_queue.get()
+            try:
+                log.debug(f"Получено сообщение для отправки на сервер: {message}")
+                self._socket_lock.acquire(True)
+                self._socket.send(message)
+                log.debug("Полученное для отправки на сервер сообщение отправлено")
+            except BrokenPipeError as e:
+                log.critical("Нет соединения с сервером: %s", e)
+                self._connected = False
+                return
+            except sock.timeout as e:  # в соответствии с описанием в лекции, не тестировалось
+                log.critical("Превышено время ожидания посылки данных серверу: %s", e)
+                return False
+            except Exception as e:
+                log.critical("Непредвиденная ошибка при отправке сообщения: %s", e)
+                return
+            finally:
+                self._socket_lock.release()
+            self._writer_queue.task_done()
+            log.debug(f"Размер очереди исходящих сообщений: {self._writer_queue.qsize()}")
+
     def __init__(self, server_address: str = None, server_port: str = None, nickname: str = None):
         self._server_address = server_address if server_address else sett.DEFAULT_SERVER_ADDRESS
         self._server_port = int(server_port) if server_port else sett.DEFAULT_PORT
@@ -26,6 +107,7 @@ class Client:
             self._socket.settimeout(sett.CONNECTION_TIMEOUT)            # timeout of connection to server
             self._socket.connect((self._server_address, self._server_port))
             self._socket.setblocking(True)              # blocking mode - will wait for data during send() and recv()
+            self._socket.settimeout(0.1)                # timeout to use the socket to read and write simultaneously
         except ConnectionRefusedError as e:
             log.critical("Соединение отклонено сервером: %s", e)
         except sock.timeout as e:               # в соответствии с описанием в лекции, не тестировалось
@@ -40,53 +122,30 @@ class Client:
                          *self._socket.getsockname(),
                          self._nickname)
             self._connected = True
+        # MULTITHREADING INIT
+        self._socket_lock = threading.Lock()        # socket lock
+        self._reader = threading.Thread(target=self.socket_reader, daemon=True)         # socket reader
+        self._processor = threading.Thread(target=self.message_processor, daemon=True)  # message processor
+        self._writer = threading.Thread(target=self.socket_writer, daemon=True)       # message writer
+        self._reader_queue = queue.Queue()          # read queue
+        self._writer_queue = queue.Queue()          # writer queue
 
     @property
     def connected(self):
         return self._connected
 
     def _send_message_to_server(self, message: dict) -> bool:
-        if not self._connected:
-            log.error("Чат невозможен - не установлено соединение с сервером")
-            return False
-        log.debug(f"Посылка сообщения серверу: {message}")
+        log.debug(f"Постановка сообщения в очередь на отправку: {message}")
         try:
-            self._socket.send(jim.Message(**message).json.encode(sett.DEFAULT_ENCODING))
+            self._writer_queue.put(jim.Message(**message).json.encode(sett.DEFAULT_ENCODING))
         except ValueError as e:
             log.error("Ошибка формирования сообщения: %s", e)
             return False
-        except sock.timeout as e:       # в соответствии с описанием в лекции, не тестировалось
-            log.critical("Превышено время ожидания посылки данных серверу: %s", e)
-            return False
         except Exception as e:
-            log.critical("Непредвиденная ошибка при формировании или посылке сообщения: %s", e)
+            log.critical("Непредвиденная ошибка при формировании сообщения: %s", e)
             return False
         else:
             return True
-
-    def _receive_from_server(self) -> (bool, str):
-        if not self._connected:
-            log.error("Чат невозможен - не установлено соединение с сервером")
-            return False, ""
-        log.debug("Прием сообщения от сервера")
-        try:
-            response_str = self._socket.recv(jim.MAX_JIM_LEN)
-            if not response_str:
-                log.critical("Соединение закрыто сервером.")
-                self._connected = False
-                return False, ""
-            log.debug(f"Получено сообщение от сервера: {response_str}")
-        except sock.timeout as e:       # в соответствии с описанием в лекции, не тестировалось
-            log.critical("Превышено время ожидания приема данных от сервера: %s", e)
-            return False, ""
-        except BrokenPipeError as e:
-            log.critical("Нет соединения с сервером: %s", e)
-            # self._connected = False
-            return False, ""
-        except Exception as e:
-            log.critical("Непредвиденная ошибка при приеме сообщения: %s", e)
-            return False, ""
-        return True, response_str
 
     def _receive_response_from_server(self) -> (bool, jim.Response):
         log.debug("Прием ответа (response) от сервера")
@@ -213,10 +272,20 @@ class Client:
     def chat(self):
         if not self.send_presence():
             return
+        self._reader.start()
+        self._processor.start()
+        self._writer.start()
         try:
-            self.wait_for_messages()
+            while True:
+                pass
         except KeyboardInterrupt:
             return
+        # if not self.send_presence():
+        #     return
+        # try:
+        #     self.wait_for_messages()
+        # except KeyboardInterrupt:
+        #     return
 
     def shutdown(self):
         if self._connected:

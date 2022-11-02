@@ -220,6 +220,7 @@ MESSAGE_FIELD_MAX_LENGTH = 500
 OTHER_FIELDS_MAX_LENGTH = 25
 
 ROOM_PREFIX = "#"
+BROADCAST_MESSAGE_ADDRESS = ROOM_PREFIX + "all"     # broadcast TO address to send messages to all users
 
 MESSAGE_FIELDS = {
     MessageFields.ACTION:   {MessageSettings.TYPE: Actions,

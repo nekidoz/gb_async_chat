@@ -14,9 +14,10 @@ class Client:
     """
     Chat client class
     """
-    def __init__(self, server_address: str = None, server_port: str = None):
+    def __init__(self, server_address: str = None, server_port: str = None, nickname: str = None):
         self._server_address = server_address if server_address else sett.DEFAULT_SERVER_ADDRESS
         self._server_port = int(server_port) if server_port else sett.DEFAULT_PORT
+        self._nickname = nickname if nickname else "client"
         log.debug("Соединение с чат-сервером %s:%d",
                      self._server_address if self._server_address else '(broadcast)', self._server_port)
         self._connected = False
@@ -34,9 +35,10 @@ class Client:
         except Exception as e:
             log.critical("Непредвиденная ошибка при установлении соединения с сервером: %s", e)
         else:
-            log.critical("Соединение с сервером %s:%d установлено с адреса %s:%d",
+            log.critical("Соединение с сервером %s:%d установлено с адреса %s:%d, имя пользователя %s",
                          self._server_address if self._server_address else '(broadcast)', self._server_port,
-                         *self._socket.getsockname())
+                         *self._socket.getsockname(),
+                         self._nickname)
             self._connected = True
 
     @property
@@ -124,26 +126,31 @@ class Client:
         success, response = self._receive_response_from_server()
         if not success:
             return False
-        if response.response != jim.Responses.OK:
-            log.error("Ошибочный код возврата сервера: %s - %s",  response.response, response.message)
+        if response.response == jim.Responses.BAD_LOGIN:
+            log.error("Сервер сообщил об ошибке аутентификации: %s - %s",  response.response, response.message)
+        elif response.response == jim.Responses.NOT_FOUND:
+            log.warning("Сервер сообщил, что адресат не в сети: %s - %s",  response.response, response.message)
+        elif response.response != jim.Responses.OK:
+            log.critical("Ошибочный код возврата сервера: %s - %s",  response.response, response.message)
             return False
-        log.debug("Сообщение подтверждено")
+        else:
+            log.debug("Сообщение подтверждено")
         return True
 
     def send_presence(self) -> bool:
         return self._send_message_and_wait_for_response(
                 {jim.MessageFields.ACTION: jim.Actions.PRESENCE,
                  jim.MessageFields.USER: {
-                     jim.MessageFields.ACCOUNT_NAME: "test",
+                     jim.MessageFields.ACCOUNT_NAME: self._nickname,
                      jim.MessageFields.STATUS: "Online"
                  }
                 })
 
-    def send_chat_message(self, message_text: str) -> bool:
+    def send_chat_message(self, target_nickname: str, message_text: str) -> bool:
         return self._send_message_and_wait_for_response(
                 {jim.MessageFields.ACTION: jim.Actions.MESSAGE,
-                 jim.MessageFields.TO: "all",
-                 jim.MessageFields.FROM: "me",
+                 jim.MessageFields.TO: target_nickname,
+                 jim.MessageFields.FROM: self._nickname,
                  jim.MessageFields.MESSAGE: message_text
                 })
 
@@ -170,7 +177,7 @@ class Client:
 
     def wait_for_messages(self):
         while True:                 # wait for data from stdin or server connection
-            print("Введите сообщение: ", end="", flush=True)
+            print("Введите имя адресата/чата и сообщение через пробел: ", end="", flush=True)
             try:
                 read_ready, _, _ = select.select([sys.stdin, self._socket], [], [], sett.SELECT_TIMEOUT)
             except select.error as e:
@@ -183,8 +190,17 @@ class Client:
                 for connection in read_ready:
                     if connection.fileno() == sys.stdin.fileno():
                         # Input chat message from keyboard and send it to everyone else
-                        if not self.send_chat_message(input()):
-                            return
+                        message = input()
+                        target_nickname = message.split(" ")[0]
+                        message = message.removeprefix(target_nickname).strip()
+                        if target_nickname is None or target_nickname == "":
+                            print("Имя адресата/чата не может быть пустым")
+                        elif message is None or message == "":
+                            print("Сообщение не может быть пустым")
+                        else:
+                            log.debug("Отправка сообщения пользователю %s: %s", target_nickname, message)
+                            if not self.send_chat_message(target_nickname, message):
+                                return
                     else:
                         print("")
                         # Receive message sent by someone else
@@ -216,6 +232,7 @@ def main() -> bool:
     parser = argparse.ArgumentParser()
     parser.add_argument('address', nargs='?', default=None)
     parser.add_argument('port', nargs='?', default=None)
+    parser.add_argument('name', nargs='?', default=None)
     args = parser.parse_args()
     # Initialize client
     log.debug("Инициализация клиента для соединения с сервером (%s:%s)", args.address, args.port)
