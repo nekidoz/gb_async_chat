@@ -57,16 +57,66 @@ class Client:
     def message_processor(self):
         log.info("Обработка принятых сообщений стартовала")
         while True:
-            message = self._reader_queue.get()
-            if not message:
+            # get message from queue
+            message_bytes = self._reader_queue.get()
+            if not message_bytes:
                 log.info("Обработка принятых сообщений закончена - обнаружен признак конца очереди")
                 return
-            else:
-                log.debug(f"Получено сообщение для обработки: {message}")
-                self._writer_queue.put(message)
-                log.debug("Полученное для обработки сообщение обработано")
-                self._reader_queue.task_done()
-                log.debug(f"Размер очереди входящих сообщений: {self._reader_queue.qsize()}")
+            # process message
+            log.debug(f"Получено сообщение для обработки: {message_bytes}")
+            try:
+
+                # decode message to string
+                try:
+                    message_str = message_bytes.decode(sett.DEFAULT_ENCODING)
+                except ValueError as e:
+                    log.error("Ошибка декодирования байтовой строки сообщения: %s", e)
+                    continue
+
+                # try to interpret message as user message
+                try:
+                    message = jim.Message.from_str(message_str)
+                except ValueError as e:
+
+                    # not a user message - try to interpret it as server response
+                    try:
+                        response = jim.Response.from_str(message_str)
+                    except ValueError as e:
+
+                        # not a message nor a response - report and drop
+                        log.error("Некорректный формат сообщения: %s", e)
+                        continue
+
+                    # SUCCESS: it's a response - QUEUE IT for processing
+                    else:
+                        self._response_queue.put(response)
+                        log.debug("Получен ответ от сервера - поставлен в очередь (всего %d ответов в очереди)",
+                                  self._response_queue.qsize())
+
+                # it's a message - interpret it
+                else:
+                    if message.action != jim.Actions.MESSAGE:
+                        # message type not supported - report and drop
+                        log.error("Ожидается сообщения чата, получен неподдерживаемый тип сообщения")
+                        continue
+
+                    # SUCCESS: it's a chat message - PRINT IT
+                    else:
+                        sender = message.kwargs[jim.MessageFields.FROM]
+                        target = message.kwargs[jim.MessageFields.TO]
+                        text = message.kwargs[jim.MessageFields.MESSAGE]
+                        log.debug("Получено сообщение от '%s' для '%s': '%s'", sender, target, text)
+                        print(f"({sender}->{target}): {text}")
+
+            # unexpected exception - report and drop
+            except Exception as e:
+                log.critical("Непредвиденная ошибка при декодировании ответа: %s", e)
+                continue
+
+            # report success to log and queue
+            log.debug("Обработка сообщения прошла успешно")
+            self._reader_queue.task_done()
+            log.debug(f"Размер очереди входящих сообщений: {self._reader_queue.qsize()}")
 
     def socket_writer(self):
         if not self._connected:
@@ -107,6 +157,9 @@ class Client:
             self._socket.settimeout(sett.CONNECTION_TIMEOUT)            # timeout of connection to server
             self._socket.connect((self._server_address, self._server_port))
             self._socket.setblocking(True)              # blocking mode - will wait for data during send() and recv()
+            # !!! Почему-то, даже если поставить 0,5 секунд, writer очень долго - несколько секунд -
+            # захватывает контроль над lock. Оптимальное не слишком маленькое значение, при котором ожидание захвата
+            # lock не более секунды - 0,1.
             self._socket.settimeout(0.1)                # timeout to use the socket to read and write simultaneously
         except ConnectionRefusedError as e:
             log.critical("Соединение отклонено сервером: %s", e)
@@ -129,6 +182,7 @@ class Client:
         self._writer = threading.Thread(target=self.socket_writer, daemon=True)       # message writer
         self._reader_queue = queue.Queue()          # read queue
         self._writer_queue = queue.Queue()          # writer queue
+        self._response_queue = queue.Queue()        # server response queue
 
     @property
     def connected(self):
@@ -144,51 +198,15 @@ class Client:
         except Exception as e:
             log.critical("Непредвиденная ошибка при формировании сообщения: %s", e)
             return False
-        else:
-            return True
 
-    def _receive_response_from_server(self) -> (bool, jim.Response):
-        log.debug("Прием ответа (response) от сервера")
-        try:
-            success, response_str = self._receive_from_server()
-            if not success:
-                return False, None
-            response = jim.Response.from_str(response_str.decode(sett.DEFAULT_ENCODING))
-        except ValueError as e:
-            log.error("Некорректный формат принятого ответа: %s", e)
-            return False, None
-        except Exception as e:
-            log.critical("Непредвиденная ошибка при приеме или декодировании ответа: %s", e)
-            return False, None
-        log.debug("Ответ от сервера: %s", response.json)
-        return True, response
-
-    def _receive_message_from_server(self) -> (bool, jim.Message):
-        log.debug("Прием сообщения (message) от сервера")
-        try:
-            success, message_str = self._receive_from_server()
-            if not success:
-                return False, None
-            message = jim.Message.from_str(message_str.decode(sett.DEFAULT_ENCODING))
-        except ValueError as e:
-            log.error("Некорректный формат принятого сообщения: %s", e)
-            return False, None
-        except Exception as e:
-            log.critical("Непредвиденная ошибка при приеме или декодировании сообщения: %s", e)
-            return False, None
-        log.debug("Сообщение от сервера: %s", message.json)
-        return True, message
-
-    def _send_message_and_wait_for_response(self, message: dict) -> bool:
-        if not self._send_message_to_server(message):
-            return False
-        success, response = self._receive_response_from_server()
-        if not success:
-            return False
+        log.debug(f"Ожидание подтверждения приемки сообщения от сервера")
+        response = self._response_queue.get()
         if response.response == jim.Responses.BAD_LOGIN:
             log.error("Сервер сообщил об ошибке аутентификации: %s - %s",  response.response, response.message)
+            return False
         elif response.response == jim.Responses.NOT_FOUND:
             log.warning("Сервер сообщил, что адресат не в сети: %s - %s",  response.response, response.message)
+            return False
         elif response.response != jim.Responses.OK:
             log.critical("Ошибочный код возврата сервера: %s - %s",  response.response, response.message)
             return False
@@ -197,7 +215,7 @@ class Client:
         return True
 
     def send_presence(self) -> bool:
-        return self._send_message_and_wait_for_response(
+        return self._send_message_to_server(
                 {jim.MessageFields.ACTION: jim.Actions.PRESENCE,
                  jim.MessageFields.USER: {
                      jim.MessageFields.ACCOUNT_NAME: self._nickname,
@@ -206,78 +224,34 @@ class Client:
                 })
 
     def send_chat_message(self, target_nickname: str, message_text: str) -> bool:
-        return self._send_message_and_wait_for_response(
+        return self._send_message_to_server(
                 {jim.MessageFields.ACTION: jim.Actions.MESSAGE,
                  jim.MessageFields.TO: target_nickname,
                  jim.MessageFields.FROM: self._nickname,
                  jim.MessageFields.MESSAGE: message_text
                 })
 
-    def receive_chat_message(self) -> (bool, str, str, str):
-        """
-        Receives chat message from server
-        :return: status, sender, addressee and message
-        """
-        success, message = self._receive_message_from_server()
-        if not success:
-            return False, "", "", ""
-        try:
-            if message.action != jim.Actions.MESSAGE:
-                log.error("Ожидается сообщения чата, получено сообщение: %s", message.json)
-                return False, "", "", ""
-            else:
-                return True, \
-                       message.kwargs[jim.MessageFields.FROM], \
-                       message.kwargs[jim.MessageFields.TO], \
-                       message.kwargs[jim.MessageFields.MESSAGE]
-        except KeyError as e:
-            log.error("Неверный формат сообщения чата: %s", message.json)
-            return False, "", "", ""
-
-    def wait_for_messages(self):
-        while True:                 # wait for data from stdin or server connection
-            print("Введите имя адресата/чата и сообщение через пробел: ", end="", flush=True)
-            try:
-                read_ready, _, _ = select.select([sys.stdin, self._socket], [], [], sett.SELECT_TIMEOUT)
-            except select.error as e:
-                log.critical("Непредвиденная ошибка select(): %s", e)
-                return
-            if not read_ready:
-                print("")
-                log.debug("Нет новых сообщений")
-            else:
-                for connection in read_ready:
-                    if connection.fileno() == sys.stdin.fileno():
-                        # Input chat message from keyboard and send it to everyone else
-                        message = input()
-                        target_nickname = message.split(" ")[0]
-                        message = message.removeprefix(target_nickname).strip()
-                        if target_nickname is None or target_nickname == "":
-                            print("Имя адресата/чата не может быть пустым")
-                        elif message is None or message == "":
-                            print("Сообщение не может быть пустым")
-                        else:
-                            log.debug("Отправка сообщения пользователю %s: %s", target_nickname, message)
-                            if not self.send_chat_message(target_nickname, message):
-                                return
-                    else:
-                        print("")
-                        # Receive message sent by someone else
-                        success, sender, addressee, text = self.receive_chat_message()
-                        if not success:
-                            return
-                        log.info("Получено сообщение от '%s' для '%s': '%s'", sender, addressee, text)
-                        print(f"({sender}->{addressee}): {text}")
-
     def chat(self):
-        if not self.send_presence():
-            return
         self._reader.start()
         self._processor.start()
         self._writer.start()
+        if not self.send_presence():
+            return
         try:
             while True:
-                pass
+                print("Введите имя адресата/чата и сообщение через пробел: ", flush=True)
+                # Input chat message from keyboard and send it
+                message = input()
+                target_nickname = message.split(" ")[0]
+                message = message.removeprefix(target_nickname).strip()
+                if target_nickname is None or target_nickname == "":
+                    print("Имя адресата/чата не может быть пустым")
+                elif message is None or message == "":
+                    print("Сообщение не может быть пустым")
+                else:
+                    log.debug("Отправка сообщения пользователю %s: %s", target_nickname, message)
+                    if not self.send_chat_message(target_nickname, message):
+                        return
         except KeyboardInterrupt:
             return
         # if not self.send_presence():
