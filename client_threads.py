@@ -279,7 +279,7 @@ def main() -> bool:
     args = parser.parse_args()
     # Initialize client
     log.debug("Инициализация клиента для соединения с сервером (%s:%s)", args.address, args.port)
-    client = Client(args.address, args.port)
+    client = Client(args.address, args.port, args.name)
     if not client.connected:
         log.critical("Не удалось установить соединение с сервером, приложение завершается")
         return False
