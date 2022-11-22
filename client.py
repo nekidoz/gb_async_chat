@@ -8,9 +8,12 @@ import jim
 
 import client_settings as sett
 import client_log_config
+from ClientVerifier import ClientVerifier
 
 
-class Client:
+class Client(metaclass=ClientVerifier):
+    # ClientVerifier - раскомментируйте следующую строку, чтобы получить ошибку - глобальный атрибут сокета
+    # test = sock.socket()
     """
     Chat client class
     """
