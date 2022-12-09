@@ -9,6 +9,8 @@ import jim
 import server_settings as sett
 import server_log_config
 
+from metaclasses_and_descriptors import ServerVerifier, PortValue
+
 
 @dataclass
 class Connection:
@@ -22,10 +24,13 @@ class Connection:
         return self.connection.fileno()
 
 
-class Server:
+class Server(metaclass=ServerVerifier):
     """
     Chat server class
     """
+    # Port value descriptor
+    _port = PortValue("_port")
+
     def __init__(self, address: str = None, port: str = None):
         """
         Initialize server - open port for listening

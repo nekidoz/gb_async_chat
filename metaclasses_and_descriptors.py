@@ -80,4 +80,30 @@ class ServerVerifier(ChatClassVerifier):
 
     def __init__(self, clsname, bases, clsdict):
         # Вызываем суперкласс для общих проверок
-        super().__init__(clsname, bases, clsdict, forbidden_methods=('connect', 'accept', 'listen'))
+        super().__init__(clsname, bases, clsdict, forbidden_methods=('connect',))
+
+
+class PortValue:
+    def __init__(self, name):
+        # Для данного подхода необходимо сформировать отдельное имя атрибута
+        self.name = '_' + name
+        self.default = 7777
+
+    def __get__(self, instance, instance_type):
+        print("PortValue.__get__")
+        if instance is None:
+            return self
+        return getattr(instance, self.name, self.default)
+
+    def __set__(self, instance, value):
+        print("PortValue.__set__")
+        if not isinstance(value, int):
+            raise ValueError("Номер порта должен быть целым числом")
+        elif value < 0:
+            raise ValueError("Номер порта должен быть неотрицательным")
+        setattr(instance, self.name, value)
+
+# Реализовать дескриптор для класса серверного сокета, а в нем — проверку номера порта.
+# Это должно быть целое число (>=0). Значение порта по умолчанию равняется 7777.
+# Дескриптор надо создать в отдельном классе. Его экземпляр добавить в пределах класса серверного сокета.
+# Номер порта передается в экземпляр дескриптора при запуске сервера.

@@ -8,7 +8,7 @@ import jim
 
 import client_settings as sett
 import client_log_config
-from ClientVerifier import ClientVerifier
+from metaclasses_and_descriptors import ClientVerifier
 
 
 class Client(metaclass=ClientVerifier):
